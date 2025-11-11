@@ -1,0 +1,187 @@
+---
+title: "dm"
+author: "Santhosh"
+date: "2025-11-10"
+output:
+  html_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+# Install once (if not already)
+install.packages(c("sdtm.oak", "tidyverse", "lubridate"))
+
+# Load libraries
+library(sdtm.oak)
+library(dplyr)
+library(lubridate)
+library(haven)
+library(expss)
+setwd("D:\\Clinical R programing\\sdtmraw")
+getwd()
+dm <- read_sas("demo.sas7bdat")
+
+infm <- read_sas("inv.sas7bdat")
+
+ex <- read_sas("dose.sas7bdat")
+
+dth <- read_sas("deathgen.sas7bdat")
+
+list.files()
+
+#Assigning the variables
+dm1 <- dm %>%
+  mutate(
+         STUDYID = STUDY,
+         DOMAIN="DM",
+         VISIT=CPEVENT,
+         SUBJID=PT,
+         USUBJID=paste(STUDYID,"-",SUBJID),
+         AGE="YEARS",
+         SEX=GENDER,
+         RACE=RCE,
+         RACEOTH=RCEO,
+         COUNTRY="IND",
+         BRTHDTC=paste0(substr(DOB,1,4),"-",substr(DOB,5,6),"-",substr(DOB,7,10))) %>% select(STUDYID,DOMAIN,SUBJID,USUBJID,AGE,SEX,RACE,RACEOTH,BRTHDTC)
+
+#RFICDTC 
+rfic <- infm %>%
+  mutate(
+    RFICDTC = paste0(
+      substr(GNDT, 1, 4), "-", 
+      substr(GNDT, 5, 6), "-", 
+      substr(GNDT, 7, 8)
+    ),
+    USUBJID = paste(STUDY, "-", PT)
+  ) %>% select(USUBJID,RFICDTC)
+
+
+print(rfic$RFICDTC)  
+
+
+# RFSTDTC  from Ex
+
+ex_clean <- ex %>%
+  filter(DSDT1 != "")
+
+ex_first <- ex_clean %>%
+  mutate(USUBJID=paste(STUDY,"-",PT)) %>%
+  arrange(USUBJID, DSDT1) %>%       
+  group_by(USUBJID) %>%             
+  slice_head(n = 1) %>%             
+  ungroup() %>%
+  mutate(RFSTDTC = DSDT1) %>% select(USUBJID,RFSTDTC)
+
+#RFENDTC from EX
+ 
+ ex_last <- ex_clean %>%
+       mutate(USUBJID=paste(STUDY,"-",PT)) %>% 
+       arrange(USUBJID,DSDT1) %>%
+       group_by(USUBJID) %>%
+       slice_tail(n=1) %>%
+       ungroup() %>%
+       mutate(RFENDTC=DSDT1) %>% select(USUBJID,RFENDTC)
+#ARM & ACTARM & ARMCD & ACTARMCD      
+unique(ex$DSQS5)
+arm <- ex %>%
+         mutate(ARM=case_when(DSQS5 %in% c(1050,650,250) ~ "OXALIPLATIN HIGH DOSE",
+         DSQS5 %in% c(85,65,45) ~ "OXALIPLATIN LOW DOSE",
+         DSQS5 == "" ~ "Placebo"),
+         ARMCD=case_when(DSQS5 %in% c(1050,650,250) ~ "XH",
+         DSQS5 %in% c(85,65,45) ~ "XL",
+         DSQS5 == "" ~ "Plb"),
+         ACTARM=ARM,
+         ACTARMCD=ARMCD,
+         USUBJID=paste0(STUDY,"-",PT)) %>% 
+         select(USUBJID,ARM,ARMCD,ACTARM,ACTARMCD) %>% filter(!is.na(ARM))
+#Death
+dth1 <- dth  %>%
+  mutate(
+    DTHDTC = paste0(
+      substr(GNDT, 1, 4), "-", 
+      substr(GNDT, 5, 6), "-", 
+      substr(GNDT, 7, 8)
+    ),
+    DTHFL = if_else(DTHDTC != "" & !is.na(DTHDTC), "Y", "N"),
+    USUBJID=paste(STUDY,"-",PT)
+  ) %>% select (USUBJID,DTHDTC,DTHFL)
+  
+#Merge
+
+  rf_all <- dm1 %>%
+  left_join(rfic,     by = "USUBJID") %>%
+  left_join(ex_first, by = "USUBJID") %>%
+  left_join(ex_last,  by = "USUBJID") %>%
+  left_join(arm,      by = "USUBJID") %>%
+  left_join(dth1,     by = "USUBJID")
+  
+#Attribute 
+
+lapply(c("haven","tidyverse","admiral","metacore", "metatools","xportr"), library,            character.only = TRUE)
+
+#import difine.xml spec in xlsx format into METACORE
+metacore <- (spec_to_metacore(
+          path="E:\\sas projects\\neurology_brain study\\sdtm\\doc\\define.xlsx",
+             where_sep_sheet = FALSE,
+             quiet = TRUE))
+ 
+             
+DM <- rf_all
+    attr(dm, "label") <- "Demographics"
+    DM <- DM %>% xportr_type(metacore)  %>% 
+              xportr_length(metacore) %>% 
+              xportr_label(metacore) %>% 
+              xportr_format(metacore) %>% 
+              xportr_df_label(metacore,domain= "DM") %>% 
+xportr_write(path = "E:\\New\\DM.xpt", metadata = metacore, domain = "DM")
+
+#SUPP
+supp1<-rf_all %>% select(STUDYID,DOMAIN,USUBJID,RACEOTH)
+#Transpose
+SUPPDM <- supp1 %>% pivot_longer(
+    cols=RACEOTH,
+    names_to="QNAM",
+    values_to="QVAL") %>%
+    
+    mutate(
+          QLABEL=case_when(QNAM=="RACEOTH" ~ "Other Race"),
+          RDOMAIN=DOMAIN,
+          IDVAR="",
+          IDVARVAL="",
+          QORGIN="CRF",
+          QEVAL="Investigator") %>% 
+                       filter(QVAL!="")
+    
+   SUPPDM <- SUPPDM %>% xportr_type(metacore)  %>% 
+              xportr_length(metacore) %>% 
+              xportr_label(metacore) %>% 
+              xportr_format(metacore) %>% 
+              xportr_df_label(metacore,domain= "DM") %>% 
+xportr_write(path = "E:\\New\\SUPPDM.xpt", metadata = metacore, domain = "SUPPDM") 
+
+
+rmarkdown::render("DM.Rmd", output_format = "word_document")
+
+
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
